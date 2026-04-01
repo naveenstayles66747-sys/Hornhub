@@ -1,0 +1,8 @@
+{
+  "name": "hornhub",
+  "version": "1.0.0",
+  "description": "Hornhub — Video Platform",
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
