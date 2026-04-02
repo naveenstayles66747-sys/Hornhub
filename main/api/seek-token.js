@@ -1,27 +1,38 @@
-// ============================================================
-//  api/seek-token.js  —  SeekStreaming API Key (Vercel Version)
-//  Sirf sahi admin password hone par key milegi
-// ============================================================
+// api/seek-token.js — Vercel Serverless Function
+// SeekStreaming API key securely return karta hai admin password verify karke
 
-module.exports = async (req, res) => {
-  res.setHeader("Access-Control-Allow-Origin",  "*");
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+const CORS = {
+  'Access-Control-Allow-Origin':  '*',
+  'Access-Control-Allow-Methods': 'POST, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type',
+  'Content-Type':                 'application/json',
+};
 
-  if (req.method === "OPTIONS") return res.status(200).end();
-  if (req.method !== "POST")   return res.status(405).send("Method Not Allowed");
+module.exports = async function handler(req, res) {
+  if (req.method === 'OPTIONS') return res.status(200).setHeaders(CORS).end();
+  if (req.method !== 'POST')   return res.status(405).json({ error: 'Method not allowed' });
 
-  const { adminPass } = req.body || {};
-  const correctPass   = process.env.ADMIN_PASSWORD;
-  const seekKey       = process.env.SEEK_API_KEY;
+  Object.entries(CORS).forEach(([k, v]) => res.setHeader(k, v));
 
-  if (!correctPass || !seekKey) {
-    return res.status(500).json({ error: "Server environment variables not set" });
+  let body;
+  try {
+    body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
+  } catch {
+    return res.status(400).json({ error: 'Invalid JSON' });
   }
 
-  if (adminPass !== correctPass) {
-    return res.status(401).json({ error: "Unauthorized" });
+  const { adminPass } = body;
+
+  // Admin password verify karo (Vercel env variable se)
+  if (!adminPass || adminPass !== process.env.ADMIN_PASSWORD) {
+    return res.status(401).json({ error: 'Unauthorized' });
   }
 
-  return res.status(200).json({ key: seekKey });
+  // SeekStreaming API key env variable se do
+  const key = process.env.SEEK_API_KEY;
+  if (!key) {
+    return res.status(500).json({ error: 'API key not configured on server' });
+  }
+
+  return res.status(200).json({ key });
 };
