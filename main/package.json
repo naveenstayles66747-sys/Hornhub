@@ -4,5 +4,8 @@
   "description": "Hornhub — Video Platform",
   "engines": {
     "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "firebase-admin": "^12.0.0"
   }
 }
