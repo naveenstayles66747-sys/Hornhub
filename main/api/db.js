@@ -2,7 +2,7 @@
 // Firebase Firestore se embed codes, video stats, activity log handle karta hai
 
 const { initializeApp, cert, getApps } = require('firebase-admin/app');
-const { getFirestore, FieldValue }      = require('firebase-admin/firestore');
+const { getFirestore }                  = require('firebase-admin/firestore');
 
 // ── Firebase init (cold start pe ek baar) ────────────────────────
 function getDB() {
@@ -12,12 +12,11 @@ function getDB() {
     const privateKey  = process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n');
 
     if (!projectId || !clientEmail || !privateKey) {
-      throw new Error('Firebase env variables missing: FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL, FIREBASE_PRIVATE_KEY');
+      throw new Error(
+        'Firebase env variables missing: FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL, FIREBASE_PRIVATE_KEY'
+      );
     }
-
-    initializeApp({
-      credential: cert({ projectId, clientEmail, privateKey }),
-    });
+    initializeApp({ credential: cert({ projectId, clientEmail, privateKey }) });
   }
   return getFirestore();
 }
@@ -29,14 +28,24 @@ const CORS = {
   'Access-Control-Allow-Headers': 'Content-Type',
   'Content-Type':                 'application/json',
 };
-
 function setCORS(res) {
   Object.entries(CORS).forEach(([k, v]) => res.setHeader(k, v));
 }
 
+// ── Batch chunks — Firestore max 500 ops per batch ───────────────
+function chunkArray(arr, size = 499) {
+  const chunks = [];
+  for (let i = 0; i < arr.length; i += size) chunks.push(arr.slice(i, i + size));
+  return chunks;
+}
+
+// ── Email → safe Firestore doc ID ────────────────────────────────
+function safeEmail(email) {
+  return (email || '').toLowerCase().replace(/[^a-z0-9]/g, '_');
+}
+
 // ── Main handler ──────────────────────────────────────────────────
 module.exports = async function handler(req, res) {
-  // Preflight
   if (req.method === 'OPTIONS') {
     setCORS(res);
     return res.status(200).end();
@@ -64,46 +73,64 @@ module.exports = async function handler(req, res) {
   }
 
   try {
-    // ── 1. GET all stats + activity log on startup ──────────────
+
+    // ── 1. GET stats + activity log + (optionally) user uploads ──
     if (action === 'get_stats') {
-      const [statsSnap, actSnap] = await Promise.all([
+      const { email } = body;
+
+      const promises = [
         db.collection('video_stats').get(),
-        db.collection('activity_log').get(),
-      ]);
+        db.collection('activity_log').orderBy('ts', 'desc').limit(100).get(),
+      ];
+      if (email) {
+        promises.push(db.collection('cs_uploads').doc(safeEmail(email)).get());
+      }
+
+      const [statsSnap, actSnap, uploadsSnap] = await Promise.all(promises);
 
       const video_stats = {};
       statsSnap.forEach(doc => { video_stats[doc.id] = doc.data(); });
 
-      const activity_log = actSnap.docs
-        .map(d => d.data())
-        .sort((a, b) => (b.ts || 0) - (a.ts || 0))
-        .slice(0, 100);
+      const activity_log = actSnap.docs.map(d => d.data());
 
-      return res.status(200).json({ success: true, video_stats, activity_log });
+      const response = { success: true, video_stats, activity_log };
+
+      if (uploadsSnap) {
+        response.cs_uploads = uploadsSnap.exists
+          ? (uploadsSnap.data().uploads || [])
+          : [];
+      }
+
+      return res.status(200).json(response);
     }
 
-    // ── 2. SAVE video stats (views, likes, ratings) ─────────────
+    // ── 2. SAVE video stats ──────────────────────────────────────
     if (action === 'save_stats') {
       const { video_stats } = body;
       if (!video_stats || typeof video_stats !== 'object')
         return res.status(400).json({ error: 'video_stats missing' });
 
-      const batch = db.batch();
-      Object.entries(video_stats).forEach(([id, stats]) => {
-        batch.set(db.collection('video_stats').doc(String(id)), stats, { merge: true });
-      });
-      await batch.commit();
+      const entries = Object.entries(video_stats);
+      if (!entries.length) return res.status(200).json({ success: true });
+
+      for (const chunk of chunkArray(entries)) {
+        const batch = db.batch();
+        chunk.forEach(([id, stats]) => {
+          batch.set(db.collection('video_stats').doc(String(id)), stats, { merge: true });
+        });
+        await batch.commit();
+      }
 
       return res.status(200).json({ success: true });
     }
 
-    // ── 3. LOG activity (watch, login, signup, upload etc.) ──────
+    // ── 3. LOG activity ──────────────────────────────────────────
     if (action === 'log_activity') {
       const { type, data } = body;
       await db.collection('activity_log').add({
-        type:  type || 'unknown',
-        data:  data || {},
-        ts:    Date.now(),
+        type: type || 'unknown',
+        data: data || {},
+        ts:   Date.now(),
       });
       return res.status(200).json({ success: true });
     }
@@ -112,55 +139,49 @@ module.exports = async function handler(req, res) {
     if (action === 'clear_activity') {
       const snap = await db.collection('activity_log').get();
       if (!snap.empty) {
-        const chunks = [];
-        let chunk = [];
-        snap.docs.forEach(doc => {
-          chunk.push(doc);
-          if (chunk.length === 499) { chunks.push(chunk); chunk = []; }
-        });
-        if (chunk.length) chunks.push(chunk);
-
-        for (const ch of chunks) {
-          const b = db.batch();
-          ch.forEach(doc => b.delete(doc.ref));
-          await b.commit();
+        for (const chunk of chunkArray(snap.docs)) {
+          const batch = db.batch();
+          chunk.forEach(doc => batch.delete(doc.ref));
+          await batch.commit();
         }
       }
       return res.status(200).json({ success: true });
     }
 
-    // ── 5. SAVE embed codes (CS uploads) for a user ─────────────
+    // ── 5. SAVE uploads for a user ───────────────────────────────
     if (action === 'save_uploads') {
       const { email, cs_uploads } = body;
-      if (!email)      return res.status(400).json({ error: 'email required' });
-      if (!cs_uploads) return res.status(400).json({ error: 'cs_uploads missing' });
+      if (!email)
+        return res.status(400).json({ error: 'email required' });
+      if (!Array.isArray(cs_uploads))
+        return res.status(400).json({ error: 'cs_uploads must be an array' });
 
-      const safeEmail = email.toLowerCase().replace(/[^a-z0-9]/g, '_');
-      await db.collection('cs_uploads').doc(safeEmail).set(
+      await db.collection('cs_uploads').doc(safeEmail(email)).set(
         { email, uploads: cs_uploads, updatedAt: Date.now() },
         { merge: true }
       );
       return res.status(200).json({ success: true });
     }
 
-    // ── 6. GET embed codes for a user ───────────────────────────
+    // ── 6. GET uploads for a user ────────────────────────────────
     if (action === 'get_uploads') {
       const { email } = body;
-      if (!email) return res.status(400).json({ error: 'email required' });
+      if (!email)
+        return res.status(400).json({ error: 'email required' });
 
-      const safeEmail = email.toLowerCase().replace(/[^a-z0-9]/g, '_');
-      const snap = await db.collection('cs_uploads').doc(safeEmail).get();
-
+      const snap = await db.collection('cs_uploads').doc(safeEmail(email)).get();
       if (!snap.exists) return res.status(200).json({ success: true, cs_uploads: [] });
 
-      const { uploads } = snap.data();
-      return res.status(200).json({ success: true, cs_uploads: uploads || [] });
+      return res.status(200).json({
+        success:    true,
+        cs_uploads: snap.data().uploads || [],
+      });
     }
 
-    // ── 7. PING online (heartbeat — active users count) ─────────
+    // ── 7. PING online ───────────────────────────────────────────
     if (action === 'ping_online') {
       const { session_id, ts } = body;
-      const now = ts || Date.now();
+      const now    = ts || Date.now();
       const cutoff = now - 3 * 60 * 1000;
 
       if (session_id) {
@@ -170,22 +191,26 @@ module.exports = async function handler(req, res) {
         );
       }
 
-      const staleSnap = await db.collection('online_sessions')
-        .where('ts', '<', cutoff).get();
+      const [staleSnap, activeSnap] = await Promise.all([
+        db.collection('online_sessions').where('ts', '<', cutoff).get(),
+        db.collection('online_sessions').where('ts', '>=', cutoff).get(),
+      ]);
 
       if (!staleSnap.empty) {
-        const b = db.batch();
-        staleSnap.forEach(doc => b.delete(doc.ref));
-        await b.commit();
+        for (const chunk of chunkArray(staleSnap.docs)) {
+          const batch = db.batch();
+          chunk.forEach(doc => batch.delete(doc.ref));
+          await batch.commit();
+        }
       }
 
-      const activeSnap = await db.collection('online_sessions')
-        .where('ts', '>=', cutoff).get();
-
-      return res.status(200).json({ success: true, online_count: activeSnap.size || 1 });
+      return res.status(200).json({
+        success:      true,
+        online_count: Math.max(activeSnap.size, 1),
+      });
     }
 
-    // ── 8. LEAVE online (tab close) ─────────────────────────────
+    // ── 8. LEAVE online ──────────────────────────────────────────
     if (action === 'leave_online') {
       const { session_id } = body;
       if (session_id) {
@@ -197,7 +222,7 @@ module.exports = async function handler(req, res) {
     return res.status(400).json({ error: `Unknown action: ${action}` });
 
   } catch (err) {
-    console.error('[db] Error:', err);
+    console.error('[db] Error in action:', action, err);
     return res.status(500).json({ error: 'Server error', detail: err.message });
   }
 };
