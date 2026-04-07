@@ -6,29 +6,16 @@
 //  auth.js → request aati hai → algorithm.process() call hota hai
 //  Dono files ka POORA LOGIC yahan hai. Wahan ZERO logic hai.
 //
-//  ORIGINAL FILES SE KYA LIYA:
-//  ✅ db.js   → ping_online, leave_online, get_online
-//              get_stats, save_stats
-//              log_activity, get_activity, clear_activity
-//              save_uploads, get_uploads
-//  ✅ auth.js → signup, login
-//
-//  NAYA JO HUMNE ADD KIYA:
-//  ✅ add_view, get_views          (views counter)
-//  ✅ like_video, get_likes        (likes counter)
-//  ✅ add_comment, get_comments,   (comments)
-//     delete_comment
-//  ✅ add_share                    (share counter)
-//  ✅ add_download,                (download counter)
-//     get_video_counters
-//
-//  BUGS JO HUMNE FIX KIE:
-//  🔴 auth.js writeUsers() → sirf { users } likhta tha
-//     → poora bin wipe ho jaata tha (videos, likes, sab kuch delete)
-//     ✅ FIX: ab patchBin() use hota hai — sirf users update hote hain
-//
-//  🔴 db.js session_id → har tab ek naya count
-//     ✅ FIX: user_id (device_id) use hota hai — same browser = 1 count
+//  ACTIONS:
+//  ✅ ping_online, leave_online, get_online
+//  ✅ get_stats, save_stats
+//  ✅ save_uploads, get_uploads
+//  ✅ add_view, get_views
+//  ✅ like_video, get_likes
+//  ✅ add_comment, get_comments, delete_comment
+//  ✅ add_share
+//  ✅ add_download, get_video_counters
+//  ✅ signup, login
 // ============================================================
 
 "use strict";
@@ -55,15 +42,12 @@ class AlgorithmEngine {
   on(action, handler) { this._handlers.set(action, handler); return this; }
 
   async process(action, payload = {}) {
-    // Middleware chalao
     for (const mw of this._middleware) {
       const early = await mw(action, payload);
       if (early) return early;
     }
-    // Handler dhundho
     const handler = this._handlers.get(action);
     if (!handler) return this._err(400, `Unknown action: "${action}"`);
-    // Handler chalao
     try {
       return await handler(payload);
     } catch (err) {
@@ -72,33 +56,23 @@ class AlgorithmEngine {
     }
   }
 
-  // Response helpers
   _ok(data = {})      { return { statusCode: 200, headers: CORS, body: { success: true,  ...data } }; }
   _err(code, message) { return { statusCode: code, headers: CORS, body: { success: false, error: message } }; }
 }
 
 const engine = new AlgorithmEngine();
 
-// Middleware: request logger
 engine.use(async (action) => {
   console.log(`[Algorithm] ▶ ${action} | ${new Date().toISOString()}`);
-  // kuch return nahi → handler continue hota hai
 });
 
 // ════════════════════════════════════════════════════════════
 //  ONLINE COUNTER
-//
-//  ORIGINAL (db.js): session_id use karta tha → har tab = alag count ❌
-//  FIX: user_id (device_id) use karta hai → same browser = 1 count ✅
-//
-//  Kaise kaam karta hai:
-//  • user_id key ban jaata hai online_sessions mein
-//  • Same browser ke 3 tabs → same key → count = 1
-//  • Tab band → leave_online call → key turant hata dena
-//  • 90s TTL → agar tab crash ho toh bhi expire ho jaaye
+//  user_id (device_id) use karta hai — same browser = 1 count
+//  TTL = 90s, ping every 60s
 // ════════════════════════════════════════════════════════════
 
-const ONLINE_TTL = 90 * 1000; // 90 seconds
+const ONLINE_TTL = 90 * 1000;
 
 engine.on("ping_online", async ({ user_id }) => {
   if (!user_id) return engine._err(400, "user_id required");
@@ -106,11 +80,8 @@ engine.on("ping_online", async ({ user_id }) => {
   let online_count = 0;
   await sync.patchBin((rec) => {
     rec.online_sessions = rec.online_sessions || {};
-
-    // Same key overwrite → multiple tabs = 1 entry
     rec.online_sessions[user_id] = Date.now();
 
-    // Expire purane sessions
     const now = Date.now();
     for (const [k, ts] of Object.entries(rec.online_sessions)) {
       if (now - ts >= ONLINE_TTL) delete rec.online_sessions[k];
@@ -141,24 +112,20 @@ engine.on("get_online", async () => {
 });
 
 // ════════════════════════════════════════════════════════════
-//  ORIGINAL DB.JS ACTIONS — as-is, sirf yahan move kiye
+//  STATS
 // ════════════════════════════════════════════════════════════
 
-// ── get_stats ─────────────────────────────────────────────────
 engine.on("get_stats", async () => {
   const rec  = await sync.readBin();
   const now  = Date.now();
   const online_count = Object.values(rec.online_sessions || {})
     .filter(ts => now - ts < ONLINE_TTL).length;
   return engine._ok({
-    video_stats  : rec.video_stats  || {},
-    activity_log : rec.activity_log || [],
-    cs_uploads   : rec.cs_uploads   || {},
+    video_stats : rec.video_stats || {},
     online_count,
   });
 });
 
-// ── save_stats ────────────────────────────────────────────────
 engine.on("save_stats", async ({ video_stats }) => {
   if (!video_stats || typeof video_stats !== "object")
     return engine._err(400, "video_stats object required");
@@ -171,32 +138,10 @@ engine.on("save_stats", async ({ video_stats }) => {
   return engine._ok();
 });
 
-// ── log_activity ──────────────────────────────────────────────
-engine.on("log_activity", async ({ type, data }) => {
-  if (!type) return engine._err(400, "type required");
-  await sync.patchBin((rec) => {
-    const log = rec.activity_log || [];
-    log.unshift({ type, data: data || {}, ts: Date.now() });
-    if (log.length > 100) log.length = 100;
-    rec.activity_log = log;
-    return rec;
-  });
-  return engine._ok();
-});
+// ════════════════════════════════════════════════════════════
+//  UPLOADS — creator videos save/load
+// ════════════════════════════════════════════════════════════
 
-// ── get_activity ──────────────────────────────────────────────
-engine.on("get_activity", async ({ limit = 50 }) => {
-  const rec = await sync.readBin();
-  return engine._ok({ activity_log: (rec.activity_log || []).slice(0, limit) });
-});
-
-// ── clear_activity ────────────────────────────────────────────
-engine.on("clear_activity", async () => {
-  await sync.patchBin((rec) => { rec.activity_log = []; return rec; });
-  return engine._ok();
-});
-
-// ── save_uploads ──────────────────────────────────────────────
 engine.on("save_uploads", async ({ cs_uploads, email }) => {
   if (!Array.isArray(cs_uploads))
     return engine._err(400, "cs_uploads array required");
@@ -209,7 +154,6 @@ engine.on("save_uploads", async ({ cs_uploads, email }) => {
   return engine._ok();
 });
 
-// ── get_uploads ───────────────────────────────────────────────
 engine.on("get_uploads", async ({ email }) => {
   const rec = await sync.readBin();
   const all = rec.cs_uploads || {};
@@ -219,7 +163,7 @@ engine.on("get_uploads", async ({ email }) => {
 // ════════════════════════════════════════════════════════════
 //  VIEWS
 //  Frontend sessionStorage tab reload block karta hai.
-//  Server sirf increment karta hai — koi restriction nahi.
+//  Server sirf increment karta hai.
 // ════════════════════════════════════════════════════════════
 
 engine.on("add_view", async ({ video_id }) => {
@@ -242,7 +186,7 @@ engine.on("get_views", async ({ video_id }) => {
 
 // ════════════════════════════════════════════════════════════
 //  LIKES
-//  Server sirf counter rakhta hai.
+//  Server counter rakhta hai.
 //  Frontend localStorage se per-device ek like ensure karta hai.
 // ════════════════════════════════════════════════════════════
 
@@ -326,7 +270,7 @@ engine.on("delete_comment", async ({ video_id, comment_id, user_id }) => {
 });
 
 // ════════════════════════════════════════════════════════════
-//  SHARES & DOWNLOADS — unlimited counters
+//  SHARES & DOWNLOADS
 // ════════════════════════════════════════════════════════════
 
 engine.on("add_share", async ({ video_id }) => {
@@ -365,16 +309,6 @@ engine.on("get_video_counters", async ({ video_id }) => {
 
 // ════════════════════════════════════════════════════════════
 //  AUTH (optional — site works without login too)
-//
-//  ORIGINAL auth.js KA BUG:
-//  writeUsers() → JSON.stringify({ users }) likhta tha
-//  → Iska matlab poora JSONBin sirf { users: {...} } ban jaata tha
-//  → videos, likes, comments, views — sab DATA WIPE ho jaata tha ❌
-//
-//  FIX: Ab patchBin() use karta hai
-//  → Pehle poora record padhta hai
-//  → Sirf rec.users update karta hai
-//  → Baaki sab (video_views, video_likes, etc.) safe rehta hai ✅
 // ════════════════════════════════════════════════════════════
 
 engine.on("signup", async ({ email, password, name }) => {
@@ -383,7 +317,6 @@ engine.on("signup", async ({ email, password, name }) => {
   const key        = email.trim().toLowerCase();
   const hashedPass = await sync.hashPassword(password);
 
-  // patchBin use karo — sirf users update hoga, baaki data safe rahega
   let userExists = false;
   let newUser    = null;
 
@@ -391,7 +324,7 @@ engine.on("signup", async ({ email, password, name }) => {
     rec.users = rec.users || {};
     if (rec.users[key]) {
       userExists = true;
-      return rec; // kuch mat badlo
+      return rec;
     }
     rec.users[key] = {
       name  : (name || "User").trim(),
