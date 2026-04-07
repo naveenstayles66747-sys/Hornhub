@@ -1,5 +1,5 @@
 // api/db.js — Vercel Serverless Function
-// Firebase Firestore se embed codes, video stats, activity log handle karta hai
+// Firebase Firestore se video stats, uploads, online counter handle karta hai
 
 const { initializeApp, cert, getApps } = require('firebase-admin/app');
 const { getFirestore }                  = require('firebase-admin/firestore');
@@ -74,26 +74,21 @@ module.exports = async function handler(req, res) {
 
   try {
 
-    // ── 1. GET stats + activity log + (optionally) user uploads ──
+    // ── 1. GET stats ──────────────────────────────────────────────
     if (action === 'get_stats') {
       const { email } = body;
 
-      const promises = [
-        db.collection('video_stats').get(),
-        db.collection('activity_log').orderBy('ts', 'desc').limit(100).get(),
-      ];
+      const promises = [db.collection('video_stats').get()];
       if (email) {
         promises.push(db.collection('cs_uploads').doc(safeEmail(email)).get());
       }
 
-      const [statsSnap, actSnap, uploadsSnap] = await Promise.all(promises);
+      const [statsSnap, uploadsSnap] = await Promise.all(promises);
 
       const video_stats = {};
       statsSnap.forEach(doc => { video_stats[doc.id] = doc.data(); });
 
-      const activity_log = actSnap.docs.map(d => d.data());
-
-      const response = { success: true, video_stats, activity_log };
+      const response = { success: true, video_stats };
 
       if (uploadsSnap) {
         response.cs_uploads = uploadsSnap.exists
@@ -124,31 +119,7 @@ module.exports = async function handler(req, res) {
       return res.status(200).json({ success: true });
     }
 
-    // ── 3. LOG activity ──────────────────────────────────────────
-    if (action === 'log_activity') {
-      const { type, data } = body;
-      await db.collection('activity_log').add({
-        type: type || 'unknown',
-        data: data || {},
-        ts:   Date.now(),
-      });
-      return res.status(200).json({ success: true });
-    }
-
-    // ── 4. CLEAR activity log ────────────────────────────────────
-    if (action === 'clear_activity') {
-      const snap = await db.collection('activity_log').get();
-      if (!snap.empty) {
-        for (const chunk of chunkArray(snap.docs)) {
-          const batch = db.batch();
-          chunk.forEach(doc => batch.delete(doc.ref));
-          await batch.commit();
-        }
-      }
-      return res.status(200).json({ success: true });
-    }
-
-    // ── 5. SAVE uploads for a user ───────────────────────────────
+    // ── 3. SAVE uploads for a user ───────────────────────────────
     if (action === 'save_uploads') {
       const { email, cs_uploads } = body;
       if (!email)
@@ -163,7 +134,7 @@ module.exports = async function handler(req, res) {
       return res.status(200).json({ success: true });
     }
 
-    // ── 6. GET uploads for a user ────────────────────────────────
+    // ── 4. GET uploads for a user ────────────────────────────────
     if (action === 'get_uploads') {
       const { email } = body;
       if (!email)
@@ -178,7 +149,7 @@ module.exports = async function handler(req, res) {
       });
     }
 
-    // ── 7. PING online ───────────────────────────────────────────
+    // ── 5. PING online ───────────────────────────────────────────
     if (action === 'ping_online') {
       const { session_id, ts } = body;
       const now    = ts || Date.now();
@@ -210,7 +181,7 @@ module.exports = async function handler(req, res) {
       });
     }
 
-    // ── 8. LEAVE online ──────────────────────────────────────────
+    // ── 6. LEAVE online ──────────────────────────────────────────
     if (action === 'leave_online') {
       const { session_id } = body;
       if (session_id) {

@@ -49,22 +49,19 @@ module.exports = async function handler(req, res) {
   // ── SIGNUP ────────────────────────────────────────────────────
   if (action === 'signup') {
     try {
-      // Firebase Auth mein user banao
       const userRecord = await auth.createUser({
         email,
         password,
         displayName: name || 'Creator',
       });
 
-      // Firestore mein profile save karo
       await db.collection('users').doc(userRecord.uid).set({
         email,
-        name:     name || 'Creator',
-        uid:      userRecord.uid,
-        joined:   new Date().toISOString(),
-        uploads:  0,
+        name:       name || 'Creator',
+        uid:        userRecord.uid,
+        joined:     new Date().toISOString(),
+        uploads:    0,
         totalViews: 0,
-        level:    1,
       });
 
       return res.status(200).json({
@@ -73,7 +70,6 @@ module.exports = async function handler(req, res) {
       });
 
     } catch (err) {
-      // Firebase ke common errors ko readable banao
       if (err.code === 'auth/email-already-exists')
         return res.status(400).json({ error: 'This email is already registered. Please login.' });
       if (err.code === 'auth/invalid-email')
@@ -87,12 +83,8 @@ module.exports = async function handler(req, res) {
   }
 
   // ── LOGIN ─────────────────────────────────────────────────────
-  // Note: Firebase Admin SDK se direct password verify nahi hota.
-  // Frontend Firebase SDK se signInWithEmailAndPassword use karo —
-  // ya yahan REST API se verify karo.
   if (action === 'login') {
     try {
-      // Firebase Auth REST API se password verify karo
       const fbRes = await fetch(
         `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${process.env.FIREBASE_WEB_API_KEY}`,
         {
@@ -112,7 +104,6 @@ module.exports = async function handler(req, res) {
         return res.status(401).json({ error: 'Login failed. Please try again.' });
       }
 
-      // Firestore se user profile lo
       const uid      = fbData.localId;
       const userSnap = await db.collection('users').doc(uid).get();
       const profile  = userSnap.exists ? userSnap.data() : {};
@@ -121,9 +112,8 @@ module.exports = async function handler(req, res) {
         success: true,
         user: {
           email,
-          name:  profile.name  || fbData.displayName || 'Creator',
+          name: profile.name || fbData.displayName || 'Creator',
           uid,
-          level: profile.level || 1,
         },
       });
 
